@@ -1,0 +1,26 @@
+[package]
+name = "rex-hud"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-display Kitty-Graphics Bento Wallboard for Rex, Legion Go, and TermRover"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+crossterm = "0.28"
+flate2 = "1"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+resvg = "0.45"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "symbols"
