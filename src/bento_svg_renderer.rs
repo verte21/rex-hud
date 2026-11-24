@@ -412,7 +412,7 @@ fn compose_bento_wallboard_internal(
             pad,
             col_w,
             sys_h,
-            12.0,
+            gap,
             animated_pass,
             &mut anchors,
         );
@@ -528,9 +528,9 @@ fn pack_projects_into_two_columns(
             right_indices.push(idx);
             right_pref += p;
         } else {
-            let left_load = (left_pref + left_indices.len() as f32 * gap) / left_h.max(1.0);
-            let right_load = (right_pref + right_indices.len() as f32 * gap) / right_h.max(1.0);
-            if left_load <= right_load {
+            let left_bottom = left_y + left_pref + (left_indices.len() as f32) * gap;
+            let right_bottom = right_y + right_pref + (right_indices.len() as f32) * gap;
+            if left_bottom <= right_bottom {
                 left_indices.push(idx);
                 left_pref += p;
             } else {
@@ -594,30 +594,33 @@ fn layout_weighted_column_refs(
     let usable_h = (avail_h - total_gaps).max(projects.len() as f32 * 52.0);
 
     let mut fixed_sum = 0.0_f32;
-    let mut flex_weight_sum = 0.0_f32;
+    let mut flex_natural_sum = 0.0_f32;
     let mut is_header_only = Vec::with_capacity(projects.len());
 
     for proj in projects {
         let header_only = proj.todos.total_count == 0 && proj.agents.is_empty();
         is_header_only.push(header_only);
         if header_only {
-            fixed_sum += 50.0;
+            fixed_sum += 52.0;
         } else {
-            flex_weight_sum += proj.preferred_card_height();
+            flex_natural_sum += proj.preferred_card_height();
         }
     }
 
     let flex_pool = (usable_h - fixed_sum).max(60.0);
+    let scale = if flex_natural_sum > flex_pool && flex_natural_sum > 0.0 {
+        flex_pool / flex_natural_sum
+    } else {
+        1.0
+    };
     let mut cy = y;
     let mut rects = Vec::with_capacity(projects.len());
 
     for (idx, proj) in projects.iter().enumerate() {
         let h = if is_header_only[idx] {
-            50.0
-        } else if flex_weight_sum > 0.0 {
-            (flex_pool * (proj.preferred_card_height() / flex_weight_sum)).max(96.0)
+            52.0
         } else {
-            usable_h / projects.len() as f32
+            (proj.preferred_card_height() * scale).max(96.0)
         };
         rects.push(CardRect { x, y: cy, w, h });
         cy += h + gap;
@@ -1190,8 +1193,8 @@ fn render_project_workspace_card(
     );
 
     let mut cursor_y = rect.y + 56.0;
-    let card_bottom = rect.y + rect.h - 14.0;
-    let total_body_h = (card_bottom - cursor_y).max(64.0);
+    let card_bottom = rect.y + rect.h - 16.0;
+    let total_body_h = (card_bottom - cursor_y).max(56.0);
     let section_gap = 10.0_f32;
 
     let mut todo_ring = None;
@@ -1200,7 +1203,7 @@ fn render_project_workspace_card(
             total_body_h
         } else {
             let rows = project.todos.open_items.len().clamp(1, 3);
-            (32.0 + rows as f32 * 21.5).clamp(56.0, (total_body_h * 0.36).max(62.0))
+            (32.0 + rows as f32 * 21.5).clamp(56.0, (total_body_h * 0.45).max(56.0))
         };
         todo_ring = render_project_todos_section(
             svg,
@@ -1258,11 +1261,11 @@ fn render_project_agents_section(
         return row_anchors;
     }
 
-    let max_visible = ((h / 62.0).floor() as usize).clamp(1, 4);
+    let max_visible = ((h / 58.0).floor() as usize).clamp(1, 4);
     let shown = &agents[..agents.len().min(max_visible)];
-    let gap = 7.0_f32;
+    let gap = 8.0_f32;
     let row_h = ((h - gap * (shown.len().saturating_sub(1) as f32)) / shown.len() as f32)
-        .clamp(50.0, 108.0);
+        .clamp(54.0, 82.0);
     let mut ry = y;
     let max_chars = (((w - 34.0).max(50.0)) / 7.9) as usize;
 
