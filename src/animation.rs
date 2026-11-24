@@ -251,7 +251,7 @@ pub fn paint_animated_overlays(
             pixmap,
             transform,
             card.status_dot_center,
-            5.5,
+            4.0,
             dot_rgb,
             t * 2.4 + phase_offset,
         );

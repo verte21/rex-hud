@@ -1141,24 +1141,25 @@ fn render_project_workspace_card(
     } else {
         rect.y + 26.0
     };
-    let dot_center = (inner_x + 7.0, header_cy);
-    if !animated_pass {
-        let _ = write!(
-            svg,
-            r##"<circle cx="{cx:.1}" cy="{header_cy:.1}" r="5.5" fill="{accent_hex}"/>"##,
-            cx = dot_center.0,
-        );
-    }
+    let dot_center = render_project_identicon_badge(
+        svg,
+        &project.project_name,
+        palette,
+        inner_x,
+        header_cy,
+        accent_hex,
+        animated_pass,
+    );
     let _ = write!(
         svg,
         r##"<text x="{tx:.1}" y="{ty:.1}" font-family="Roboto" font-weight="bold" font-size="18" fill="{fg}">{pname}</text>"##,
-        tx = inner_x + 22.0,
+        tx = inner_x + 36.0,
         ty = header_cy + 6.0,
         fg = palette.text_primary_hex,
         pname = xml_escape(&truncate_chars(&project.project_name, 26)),
     );
 
-    let name_px_est = (project.project_name.chars().count().min(26) as f32) * 10.2 + 34.0;
+    let name_px_est = (project.project_name.chars().count().min(26) as f32) * 10.2 + 48.0;
     let mut git_diff_bar = None;
     if let Some(git) = &project.git_changes {
         git_diff_bar = render_project_header_git_summary(
@@ -1244,6 +1245,101 @@ fn render_project_workspace_card(
         git_diff_bar,
         todo_ring,
     }
+}
+
+fn render_project_identicon_badge(
+    svg: &mut String,
+    project_name: &str,
+    palette: &WallboardThemePalette,
+    x: f32,
+    header_cy: f32,
+    status_accent_hex: &str,
+    animated_pass: bool,
+) -> (f32, f32) {
+    const IDENTICON_PALETTE: [(&str, &str); 10] = [
+        ("#38bdf8", "#0f2233"),
+        ("#34d399", "#0f2922"),
+        ("#a78bfa", "#1e1736"),
+        ("#fb7185", "#2e1420"),
+        ("#fbbf24", "#2b2110"),
+        ("#2dd4bf", "#0d2929"),
+        ("#60a5fa", "#111f38"),
+        ("#e879f9", "#2a1433"),
+        ("#a3e635", "#1c2912"),
+        ("#fb923c", "#2e1c10"),
+    ];
+
+    let digest = Sha256::digest(project_name.as_bytes());
+    let (fg_hex, bg_hex) = IDENTICON_PALETTE[(digest[0] as usize) % IDENTICON_PALETTE.len()];
+
+    let size = 26.0_f32;
+    let bx = x;
+    let by = header_cy - size * 0.5;
+
+    let _ = write!(
+        svg,
+        r##"<rect x="{bx:.1}" y="{by:.1}" width="{size:.1}" height="{size:.1}" rx="7" fill="{bg_hex}" stroke="{fg_hex}" stroke-opacity="0.45" stroke-width="1"/>"##,
+    );
+
+    let mut cells = [[false; 5]; 5];
+    let mut lit_count = 0_usize;
+    for row in 0..5 {
+        for half_col in 0..3 {
+            let bit_index = row * 3 + half_col;
+            let byte = digest[1 + (bit_index / 8)];
+            let bit = (byte >> (bit_index % 8)) & 1 == 1;
+            cells[row][half_col] = bit;
+            cells[row][4 - half_col] = bit;
+            if bit {
+                lit_count += if half_col == 2 { 1 } else { 2 };
+            }
+        }
+    }
+    if lit_count < 5 {
+        cells[1][1] = true;
+        cells[1][3] = true;
+        cells[2][2] = true;
+        cells[3][1] = true;
+        cells[3][3] = true;
+    }
+
+    let grid_origin_x = bx + 4.5;
+    let grid_origin_y = by + 4.5;
+    let step = 3.5_f32;
+    let cell_size = 3.0_f32;
+
+    for (row_idx, row_cells) in cells.iter().enumerate() {
+        for (col_idx, &is_lit) in row_cells.iter().enumerate() {
+            if !is_lit {
+                continue;
+            }
+            let cx = grid_origin_x + col_idx as f32 * step;
+            let cy = grid_origin_y + row_idx as f32 * step;
+            let _ = write!(
+                svg,
+                r##"<rect x="{cx:.1}" y="{cy:.1}" width="{cell_size:.1}" height="{cell_size:.1}" rx="0.8" fill="{fg_hex}"/>"##,
+            );
+        }
+    }
+
+    let dot_center = (bx + size - 1.5, by + size - 1.5);
+    let _ = write!(
+        svg,
+        r##"<circle cx="{cx:.1}" cy="{cy:.1}" r="5.4" fill="{cutout}"/>"##,
+        cx = dot_center.0,
+        cy = dot_center.1,
+        cutout = palette.card_bg_hex,
+    );
+    if !animated_pass {
+        let _ = write!(
+            svg,
+            r##"<circle cx="{cx:.1}" cy="{cy:.1}" r="4.0" fill="{status_accent_hex}"/>"##,
+            cx = dot_center.0,
+            cy = dot_center.1,
+        );
+    }
+
+    dot_center
 }
 
 fn render_project_agents_section(
