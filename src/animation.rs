@@ -172,13 +172,13 @@ impl AnimationTimeline {
 
     pub fn recommended_frame_interval_ms(&self, snapshot: &WallboardSnapshot) -> u64 {
         if self.elapsed_seconds < 0.65 || self.any_spring_settling() {
-            return 16;
+            return 42;
         }
         let counts = snapshot.state_counts();
         if counts.blocked > 0 || counts.error > 0 || counts.working > 0 {
-            return 16;
+            return 80;
         }
-        55
+        500
     }
 
     pub fn text_spinner_glyph(&self) -> &'static str {

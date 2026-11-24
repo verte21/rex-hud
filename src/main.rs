@@ -161,6 +161,7 @@ fn run_kitty_svg_wallboard_loop(
         loop {
             if let Some(next_snapshot) = engine.poll_latest() {
                 snapshot = next_snapshot;
+                canvas.mark_snapshot_dirty();
                 osc_emitter.emit_if_changed(&mut stdout, &snapshot);
             }
 

@@ -110,6 +110,7 @@ pub struct KittyViewportCanvas {
     active_image_id: Option<u32>,
     cached_base_hash: String,
     cached_base_pixmap: Option<Pixmap>,
+    base_dirty: bool,
     pub cached_anchors: WallboardSceneAnchors,
 }
 
@@ -128,13 +129,19 @@ impl KittyViewportCanvas {
             active_image_id: None,
             cached_base_hash: String::new(),
             cached_base_pixmap: None,
+            base_dirty: true,
             cached_anchors: WallboardSceneAnchors::default(),
         }
+    }
+
+    pub fn mark_snapshot_dirty(&mut self) {
+        self.base_dirty = true;
     }
 
     pub fn invalidate(&mut self) {
         self.cached_base_hash.clear();
         self.cached_base_pixmap = None;
+        self.base_dirty = true;
     }
 
     pub fn render_animated_frame<W: IoWrite>(
@@ -146,25 +153,34 @@ impl KittyViewportCanvas {
         timeline: &mut AnimationTimeline,
     ) -> Result<()> {
         let (render_w, render_h) = compute_streaming_pixel_size(geometry);
-        let (svg_markup, anchors) = compose_bento_wallboard_svg_with_anchors(snapshot, palette, geometry);
+        let size_changed = self
+            .cached_base_pixmap
+            .as_ref()
+            .is_none_or(|p| p.width() != render_w || p.height() != render_h);
 
-        let mut hasher = Sha256::new();
-        hasher.update(svg_markup.as_bytes());
-        hasher.update(render_w.to_le_bytes());
-        hasher.update(render_h.to_le_bytes());
-        let base_hash = format!("{:x}", hasher.finalize());
+        if self.base_dirty || size_changed {
+            let (svg_markup, anchors) =
+                compose_bento_wallboard_svg_with_anchors(snapshot, palette, geometry);
 
-        if base_hash != self.cached_base_hash || self.cached_base_pixmap.is_none() {
-            let base_pixmap = self.rasterize_svg_to_pixmap(
-                &svg_markup,
-                render_w,
-                render_h,
-                palette.bg_rgb,
-            )?;
-            self.cached_base_pixmap = Some(base_pixmap);
-            self.cached_anchors = anchors;
-            self.cached_base_hash = base_hash;
-            timeline.sync_targets(snapshot, &self.cached_anchors);
+            let mut hasher = Sha256::new();
+            hasher.update(svg_markup.as_bytes());
+            hasher.update(render_w.to_le_bytes());
+            hasher.update(render_h.to_le_bytes());
+            let base_hash = format!("{:x}", hasher.finalize());
+
+            if base_hash != self.cached_base_hash || self.cached_base_pixmap.is_none() {
+                let base_pixmap = self.rasterize_svg_to_pixmap(
+                    &svg_markup,
+                    render_w,
+                    render_h,
+                    palette.bg_rgb,
+                )?;
+                self.cached_base_pixmap = Some(base_pixmap);
+                self.cached_anchors = anchors;
+                self.cached_base_hash = base_hash;
+                timeline.sync_targets(snapshot, &self.cached_anchors);
+            }
+            self.base_dirty = false;
         }
 
         timeline.step_frame();
