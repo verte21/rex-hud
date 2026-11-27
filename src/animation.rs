@@ -215,7 +215,7 @@ pub fn paint_animated_overlays(
         pixmap,
         transform,
         anchors.header_orb_center,
-        7.0,
+        7.5,
         orb_rgb,
         t * 2.6,
     );
@@ -605,7 +605,7 @@ fn paint_progress_ring_arc(
         radius,
         -PI * 0.5,
         sweep,
-        4.5,
+        4.8,
         SkiaColor::from_rgba8(rgb.0, rgb.1, rgb.2, 255),
     );
 }

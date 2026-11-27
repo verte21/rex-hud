@@ -70,12 +70,22 @@ impl ViewportPixelGeometry {
     }
 }
 
+fn env_flag_enabled(name: &str) -> Option<bool> {
+    let val = std::env::var(name).ok()?;
+    let trimmed = val.trim().to_ascii_lowercase();
+    if trimmed.is_empty() || matches!(trimmed.as_str(), "0" | "false" | "no" | "off") {
+        Some(false)
+    } else {
+        Some(true)
+    }
+}
+
 pub fn terminal_supports_kitty_graphics() -> bool {
-    if std::env::var_os("REX_HUD_TEXT").is_some() {
+    if env_flag_enabled("REX_HUD_TEXT") == Some(true) {
         return false;
     }
-    if std::env::var_os("REX_HUD_KITTY").is_some() {
-        return true;
+    if let Some(forced) = env_flag_enabled("REX_HUD_KITTY") {
+        return forced;
     }
     if std::env::var_os("TMUX").is_some() {
         return false;
@@ -111,11 +121,17 @@ pub struct KittyViewportCanvas {
     cached_base_hash: String,
     cached_base_pixmap: Option<Pixmap>,
     base_dirty: bool,
+    ui_scale: f32,
     pub cached_anchors: WallboardSceneAnchors,
 }
 
 impl KittyViewportCanvas {
+    #[allow(dead_code)]
     pub fn new() -> Self {
+        Self::with_scale(1.0)
+    }
+
+    pub fn with_scale(ui_scale: f32) -> Self {
         let mut db = fontdb::Database::new();
         db.load_font_data(EMBEDDED_ROBOTO_REGULAR.to_vec());
         db.load_font_data(EMBEDDED_ROBOTO_BOLD.to_vec());
@@ -130,6 +146,7 @@ impl KittyViewportCanvas {
             cached_base_hash: String::new(),
             cached_base_pixmap: None,
             base_dirty: true,
+            ui_scale: ui_scale.clamp(0.65, 2.2),
             cached_anchors: WallboardSceneAnchors::default(),
         }
     }
@@ -159,8 +176,12 @@ impl KittyViewportCanvas {
             .is_none_or(|p| p.width() != render_w || p.height() != render_h);
 
         if self.base_dirty || size_changed {
-            let (svg_markup, anchors) =
-                compose_bento_wallboard_svg_with_anchors(snapshot, palette, geometry);
+            let (svg_markup, anchors) = compose_bento_wallboard_svg_with_anchors_scaled(
+                snapshot,
+                palette,
+                geometry,
+                self.ui_scale,
+            );
 
             let mut hasher = Sha256::new();
             hasher.update(svg_markup.as_bytes());
@@ -247,8 +268,12 @@ impl KittyViewportCanvas {
         geometry: ViewportPixelGeometry,
         output_path: &std::path::Path,
     ) -> Result<()> {
-        let (svg_markup, anchors) =
-            compose_bento_wallboard_svg_with_anchors(snapshot, palette, geometry);
+        let (svg_markup, anchors) = compose_bento_wallboard_svg_with_anchors_scaled(
+            snapshot,
+            palette,
+            geometry,
+            self.ui_scale,
+        );
         let mut pixmap = self.rasterize_svg_to_pixmap(
             &svg_markup,
             geometry.pixel_width,
@@ -360,33 +385,56 @@ struct CardRect {
     h: f32,
 }
 
+#[allow(dead_code)]
 pub fn compose_bento_wallboard_svg(
     snapshot: &WallboardSnapshot,
     palette: &WallboardThemePalette,
     geometry: ViewportPixelGeometry,
 ) -> String {
-    compose_bento_wallboard_internal(snapshot, palette, geometry, false).0
+    compose_bento_wallboard_svg_scaled(snapshot, palette, geometry, 1.0)
 }
 
+pub fn compose_bento_wallboard_svg_scaled(
+    snapshot: &WallboardSnapshot,
+    palette: &WallboardThemePalette,
+    geometry: ViewportPixelGeometry,
+    ui_scale: f32,
+) -> String {
+    compose_bento_wallboard_internal(snapshot, palette, geometry, ui_scale, false).0
+}
+
+#[allow(dead_code)]
 pub fn compose_bento_wallboard_svg_with_anchors(
     snapshot: &WallboardSnapshot,
     palette: &WallboardThemePalette,
     geometry: ViewportPixelGeometry,
 ) -> (String, WallboardSceneAnchors) {
-    compose_bento_wallboard_internal(snapshot, palette, geometry, true)
+    compose_bento_wallboard_svg_with_anchors_scaled(snapshot, palette, geometry, 1.0)
+}
+
+pub fn compose_bento_wallboard_svg_with_anchors_scaled(
+    snapshot: &WallboardSnapshot,
+    palette: &WallboardThemePalette,
+    geometry: ViewportPixelGeometry,
+    ui_scale: f32,
+) -> (String, WallboardSceneAnchors) {
+    compose_bento_wallboard_internal(snapshot, palette, geometry, ui_scale, true)
 }
 
 fn compose_bento_wallboard_internal(
     snapshot: &WallboardSnapshot,
     palette: &WallboardThemePalette,
     geometry: ViewportPixelGeometry,
+    ui_scale: f32,
     animated_pass: bool,
 ) -> (String, WallboardSceneAnchors) {
     let aspect =
         (geometry.pixel_width as f32 / geometry.pixel_height.max(1) as f32).clamp(0.45, 3.2);
     let wide_mode = aspect >= 1.18;
-    let logical_w: f32 = if wide_mode { 1600.0 } else { 900.0 };
-    let logical_h: f32 = (logical_w / aspect).clamp(620.0, 1900.0);
+    let clamped_scale = ui_scale.clamp(0.65, 2.2);
+    let base_logical_w: f32 = if wide_mode { 1080.0 } else { 720.0 };
+    let logical_w: f32 = (base_logical_w / clamped_scale).clamp(520.0, 2200.0);
+    let logical_h: f32 = (logical_w / aspect).clamp(360.0, 1900.0);
 
     let mut anchors = WallboardSceneAnchors {
         logical_width: logical_w,
@@ -406,19 +454,19 @@ fn compose_bento_wallboard_internal(
         r##"<rect x="0" y="0" width="{logical_w:.0}" height="{logical_h:.0}" fill="url(#bgGrad)"/>"##
     );
 
-    let pad = 18.0_f32;
+    let pad = 16.0_f32;
     let gap = 14.0_f32;
     let inner_w = logical_w - pad * 2.0;
-    let inner_h = (logical_h - pad * 2.0).max(360.0);
+    let inner_h = (logical_h - pad * 2.0).max(320.0);
+    let col_w = (inner_w - gap) * 0.5;
+    let sys_h = 160.0_f32;
 
     let max_projects = if wide_mode { 6 } else { 4 };
     let projects = &snapshot.projects[..snapshot.projects.len().min(max_projects)];
 
-    if wide_mode && projects.len() >= 2 {
-        let col_w = (inner_w - gap) * 0.5;
+    if wide_mode && projects.len() >= 2 && col_w >= 720.0 {
         let left_x = pad;
         let right_x = pad + col_w + gap;
-        let sys_h = 148.0_f32;
 
         render_system_cluster(
             &mut svg,
@@ -435,7 +483,7 @@ fn compose_bento_wallboard_internal(
 
         let left_h = inner_h;
         let right_y = pad + sys_h + gap;
-        let right_h = (inner_h - sys_h - gap).max(260.0);
+        let right_h = (inner_h - sys_h - gap).max(220.0);
 
         let slots = pack_projects_into_two_columns(
             projects,
@@ -461,8 +509,7 @@ fn compose_bento_wallboard_internal(
     }
 
     let mut cursor_y = pad;
-    if wide_mode {
-        let sys_h = 148.0_f32;
+    if wide_mode && inner_w >= 720.0 {
         render_system_cluster(
             &mut svg,
             snapshot,
@@ -490,12 +537,12 @@ fn compose_bento_wallboard_internal(
         ) + gap;
     }
 
-    let grid_h = (logical_h - cursor_y - pad).max(240.0);
+    let grid_h = (logical_h - cursor_y - pad).max(200.0);
     if projects.is_empty() {
         let _ = write!(
             svg,
             r##"<rect x="{pad:.1}" y="{cursor_y:.1}" width="{inner_w:.1}" height="{grid_h:.1}" rx="16" fill="{card}" stroke="{border}" stroke-width="1.2"/>
-<text x="{cx:.1}" y="{cy:.1}" text-anchor="middle" font-family="Roboto" font-size="17" fill="{muted}">No active project agents, dirty repositories, or open to-dos</text>"##,
+<text x="{cx:.1}" y="{cy:.1}" text-anchor="middle" font-family="Roboto" font-size="20" fill="{muted}">No active project agents, dirty repositories, or open to-dos</text>"##,
             card = palette.card_bg_hex,
             border = palette.card_border_hex,
             cx = pad + inner_w * 0.5,
@@ -506,7 +553,22 @@ fn compose_bento_wallboard_internal(
         return (svg, anchors);
     }
 
-    let slots = layout_weighted_column(projects, pad, cursor_y, inner_w, grid_h, gap);
+    let slots = if wide_mode && projects.len() >= 2 && col_w >= 440.0 {
+        pack_projects_into_two_columns(
+            projects,
+            pad,
+            cursor_y,
+            col_w,
+            grid_h,
+            pad + col_w + gap,
+            cursor_y,
+            col_w,
+            grid_h,
+            gap,
+        )
+    } else {
+        layout_weighted_column(projects, pad, cursor_y, inner_w, grid_h, gap)
+    };
     for (project, rect) in projects.iter().zip(slots.into_iter()) {
         let card_anchor =
             render_project_workspace_card(&mut svg, project, palette, rect, animated_pass);
@@ -607,7 +669,7 @@ fn layout_weighted_column_refs(
         return Vec::new();
     }
     let total_gaps = gap * (projects.len().saturating_sub(1) as f32);
-    let usable_h = (avail_h - total_gaps).max(projects.len() as f32 * 52.0);
+    let usable_h = (avail_h - total_gaps).max(projects.len() as f32 * 58.0);
 
     let mut fixed_sum = 0.0_f32;
     let mut flex_natural_sum = 0.0_f32;
@@ -617,13 +679,13 @@ fn layout_weighted_column_refs(
         let header_only = proj.todos.total_count == 0 && proj.agents.is_empty();
         is_header_only.push(header_only);
         if header_only {
-            fixed_sum += 52.0;
+            fixed_sum += 58.0;
         } else {
             flex_natural_sum += proj.preferred_card_height();
         }
     }
 
-    let flex_pool = (usable_h - fixed_sum).max(60.0);
+    let flex_pool = (usable_h - fixed_sum).max(64.0);
     let scale = if flex_natural_sum > flex_pool && flex_natural_sum > 0.0 {
         flex_pool / flex_natural_sum
     } else {
@@ -634,9 +696,9 @@ fn layout_weighted_column_refs(
 
     for (idx, proj) in projects.iter().enumerate() {
         let h = if is_header_only[idx] {
-            52.0
+            58.0
         } else {
-            (proj.preferred_card_height() * scale).max(96.0)
+            (proj.preferred_card_height() * scale).max(104.0)
         };
         rects.push(CardRect { x, y: cy, w, h });
         cy += h + gap;
@@ -696,7 +758,7 @@ fn render_system_cluster(
         format!("{:.1} / {:.0} GiB", v.memory_used_gib, v.memory_total_gib)
     };
 
-    let chart_w = ((w - gap * 2.0) * 0.305).clamp(210.0, 270.0);
+    let chart_w = ((w - gap * 2.0) * 0.305).clamp(210.0, 320.0);
     let ram_x = x + w - chart_w;
     let cpu_x = ram_x - gap - chart_w;
     let host_w = (cpu_x - gap - x).max(220.0);
@@ -773,7 +835,7 @@ fn render_narrow_system_stack(
         format!("{:.1} / {:.0} GiB", v.memory_used_gib, v.memory_total_gib)
     };
 
-    let host_h = 104.0_f32;
+    let host_h = 112.0_f32;
     render_host_vitals_card(
         svg,
         snapshot,
@@ -787,7 +849,7 @@ fn render_narrow_system_stack(
     );
 
     let chart_y = y + host_h + gap;
-    let chart_h = 148.0_f32;
+    let chart_h = 160.0_f32;
     let half_w = (w - gap) * 0.5;
 
     anchors.cpu_chart_rect = Some(render_metric_chart_card(
@@ -846,7 +908,7 @@ fn render_host_vitals_card(
         border = palette.card_border_hex,
     );
 
-    let top_cy = y + 24.0;
+    let top_cy = y + 26.0;
     anchors.header_orb_center = (x + 20.0, top_cy);
     anchors.header_orb_state = if counts.blocked > 0 {
         Some(AgentActivityState::Blocked)
@@ -868,14 +930,14 @@ fn render_host_vitals_card(
         };
         let _ = write!(
             svg,
-            r##"<circle cx="{cx:.1}" cy="{top_cy:.1}" r="5.5" fill="{orb}"/>"##,
+            r##"<circle cx="{cx:.1}" cy="{top_cy:.1}" r="6.0" fill="{orb}"/>"##,
             cx = x + 20.0,
             orb = orb_color,
         );
     }
 
     let full_host_title = format!("{} · {}", v.hostname, v.platform_label);
-    let max_host_chars = ((w - 118.0).max(12.0) / 7.6) as usize;
+    let max_host_chars = ((w - 132.0).max(12.0) / 8.5) as usize;
     let host_title = if full_host_title.chars().count() <= max_host_chars {
         full_host_title
     } else {
@@ -889,27 +951,27 @@ fn render_host_vitals_card(
 
     let _ = write!(
         svg,
-        r##"<text x="{tx:.1}" y="{ty:.1}" font-family="Roboto" font-weight="bold" font-size="14.5" fill="{fg}">{host}</text>
-<text x="{rx:.1}" y="{cy:.1}" text-anchor="end" font-family="Fira Code" font-weight="bold" font-size="19.5" fill="{fg}">{clock}</text>
+        r##"<text x="{tx:.1}" y="{ty:.1}" font-family="Roboto" font-weight="bold" font-size="16" fill="{fg}">{host}</text>
+<text x="{rx:.1}" y="{cy:.1}" text-anchor="end" font-family="Fira Code" font-weight="bold" font-size="22" fill="{fg}">{clock}</text>
 <line x1="{lx1:.1}" y1="{ly:.1}" x2="{lx2:.1}" y2="{ly:.1}" stroke="{border}" stroke-width="1"/>"##,
-        tx = x + 34.0,
-        ty = top_cy + 5.0,
+        tx = x + 35.0,
+        ty = top_cy + 5.5,
         rx = x + w - 14.0,
-        cy = top_cy + 6.0,
+        cy = top_cy + 7.0,
         fg = palette.text_primary_hex,
-        host = xml_escape(&truncate_chars(&host_title, ((w - 118.0).max(12.0) / 7.6) as usize)),
+        host = xml_escape(&truncate_chars(&host_title, max_host_chars.max(8))),
         clock = xml_escape(display_clock),
         lx1 = x + 14.0,
         lx2 = x + w - 14.0,
-        ly = y + 43.0,
+        ly = y + 46.0,
         border = palette.card_border_hex,
     );
 
     let box_x = x + 14.0;
     let box_w = w - 28.0;
 
-    let disk_y = y + 51.0;
-    let disk_h = 44.0_f32;
+    let disk_y = y + 54.0;
+    let disk_h = 48.0_f32;
     let _ = write!(
         svg,
         r##"<rect x="{box_x:.1}" y="{disk_y:.1}" width="{box_w:.1}" height="{disk_h:.1}" rx="9" fill="#090d15" stroke="{border}" stroke-width="0.9"/>"##,
@@ -926,26 +988,26 @@ fn render_host_vitals_card(
     let fill_w = (bar_w * (disk_pct / 100.0)).clamp(3.0, bar_w);
     let _ = write!(
         svg,
-        r##"<text x="{tx:.1}" y="{ty:.1}" font-family="Fira Code" font-size="11.2" fill="{sec}">{lbl}</text>
-<text x="{rx:.1}" y="{ty:.1}" text-anchor="end" font-family="Fira Code" font-weight="bold" font-size="11.2" fill="{cyan}">{pct:.0}%</text>
-<rect x="{bar_x:.1}" y="{by:.1}" width="{bar_w:.1}" height="5.5" rx="2.7" fill="#131b29"/>
-<rect x="{bar_x:.1}" y="{by:.1}" width="{fill_w:.1}" height="5.5" rx="2.7" fill="{cyan}"/>"##,
+        r##"<text x="{tx:.1}" y="{ty:.1}" font-family="Fira Code" font-size="12.5" fill="{sec}">{lbl}</text>
+<text x="{rx:.1}" y="{ty:.1}" text-anchor="end" font-family="Fira Code" font-weight="bold" font-size="12.5" fill="{cyan}">{pct:.0}%</text>
+<rect x="{bar_x:.1}" y="{by:.1}" width="{bar_w:.1}" height="6.5" rx="3.2" fill="#131b29"/>
+<rect x="{bar_x:.1}" y="{by:.1}" width="{fill_w:.1}" height="6.5" rx="3.2" fill="{cyan}"/>"##,
         tx = bar_x,
         rx = bar_x + bar_w,
-        ty = disk_y + 19.0,
-        by = disk_y + 28.5,
+        ty = disk_y + 20.5,
+        by = disk_y + 31.0,
         sec = palette.text_secondary_hex,
         cyan = palette.accent_cyan_hex,
-        lbl = xml_escape(&disk_label),
+        lbl = xml_escape(&truncate_chars(&disk_label, ((bar_w - 42.0).max(10.0) / 7.6) as usize)),
         pct = disk_pct,
     );
 
-    if h < 120.0 {
+    if h < 126.0 {
         return;
     }
 
-    let bottom_y = y + 103.0;
-    let bottom_h = (h - 114.0).max(28.0);
+    let bottom_y = y + 110.0;
+    let bottom_h = (h - 122.0).max(32.0);
     let bg_sessions = snapshot.background_rex_sessions();
 
     let mut power_parts = Vec::new();
@@ -978,7 +1040,7 @@ fn render_host_vitals_card(
     };
 
     let tile_gap = 8.0_f32;
-    let left_tile_w = (box_w * 0.42).clamp(84.0, 128.0);
+    let left_tile_w = (box_w * 0.46).clamp(96.0, 186.0);
     let right_tile_w = (box_w - left_tile_w - tile_gap).max(72.0);
 
     for (tx, tw, txt, fg_hex) in [
@@ -998,11 +1060,11 @@ fn render_host_vitals_card(
         let _ = write!(
             svg,
             r##"<rect x="{tx:.1}" y="{bottom_y:.1}" width="{tw:.1}" height="{bottom_h:.1}" rx="8" fill="#0d131f" stroke="{border}" stroke-width="0.9"/>
-<text x="{cx:.1}" y="{cy:.1}" text-anchor="middle" font-family="Fira Code" font-weight="bold" font-size="11.5" fill="{fg_hex}">{t}</text>"##,
+<text x="{cx:.1}" y="{cy:.1}" text-anchor="middle" font-family="Fira Code" font-weight="bold" font-size="12.5" fill="{fg_hex}">{t}</text>"##,
             border = palette.card_border_hex,
             cx = tx + tw * 0.5,
-            cy = bottom_y + bottom_h * 0.5 + 4.1,
-            t = xml_escape(&truncate_chars(txt, ((tw - 12.0).max(8.0) / 7.3) as usize)),
+            cy = bottom_y + bottom_h * 0.5 + 4.4,
+            t = xml_escape(&truncate_chars(txt, ((tw - 12.0).max(8.0) / 7.8) as usize)),
         );
     }
 }
@@ -1026,29 +1088,29 @@ fn render_metric_chart_card<I: Iterator<Item = f32>>(
     let _ = write!(
         svg,
         r##"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" rx="16" fill="{card}" stroke="{border}" stroke-width="1.2"/>
-<text x="{tx:.1}" y="{ty:.1}" font-family="Roboto" font-weight="bold" font-size="12.5" letter-spacing="0.8" fill="{muted}">{title}</text>
-<text x="{tx:.1}" y="{sy:.1}" font-family="Fira Code" font-size="11.8" fill="{sec}">{sub}</text>
-<text x="{vx:.1}" y="{vy:.1}" text-anchor="end" font-family="Fira Code" font-weight="bold" font-size="23" fill="{accent_hex}">{pct:.0}%</text>"##,
+<text x="{tx:.1}" y="{ty:.1}" font-family="Roboto" font-weight="bold" font-size="13.5" letter-spacing="0.8" fill="{muted}">{title}</text>
+<text x="{tx:.1}" y="{sy:.1}" font-family="Fira Code" font-size="12.5" fill="{sec}">{sub}</text>
+<text x="{vx:.1}" y="{vy:.1}" text-anchor="end" font-family="Fira Code" font-weight="bold" font-size="26" fill="{accent_hex}">{pct:.0}%</text>"##,
         card = palette.card_bg_hex,
         border = palette.card_border_hex,
         tx = x + 14.0,
-        ty = y + 23.0,
-        sy = y + 41.0,
+        ty = y + 24.0,
+        sy = y + 43.0,
         vx = x + w - 14.0,
-        vy = y + 34.0,
+        vy = y + 37.0,
         muted = palette.text_muted_hex,
         sec = palette.text_secondary_hex,
         title = xml_escape(title),
-        sub = xml_escape(&truncate_chars(subtitle, ((w - 92.0).max(10.0) / 7.2) as usize)),
+        sub = xml_escape(&truncate_chars(subtitle, ((w - 98.0).max(10.0) / 7.7) as usize)),
         pct = live_percent.clamp(0.0, 100.0),
     );
 
     let plot_x = x + 14.0;
-    let plot_y = y + 51.0;
+    let plot_y = y + 54.0;
     let plot_w = (w - 28.0).max(80.0);
-    let plot_h = (h - 63.0).max(52.0);
+    let plot_h = (h - 66.0).max(56.0);
 
-    let axis_x = plot_x + 32.0;
+    let axis_x = plot_x + 36.0;
     let plot_right = plot_x + plot_w;
     let plot_inner_w = (plot_right - axis_x).max(40.0);
 
@@ -1073,12 +1135,12 @@ fn render_metric_chart_card<I: Iterator<Item = f32>>(
 
     let _ = write!(
         svg,
-        r##"<text x="{lx:.1}" y="{y100:.1}" text-anchor="end" font-family="Fira Code" font-size="9.2" fill="#64748b">100%</text>
-<text x="{lx:.1}" y="{y50:.1}" text-anchor="end" font-family="Fira Code" font-size="9.2" fill="#64748b">50%</text>
-<text x="{lx:.1}" y="{y0:.1}" text-anchor="end" font-family="Fira Code" font-size="9.2" fill="#64748b">0%</text>"##,
+        r##"<text x="{lx:.1}" y="{y100:.1}" text-anchor="end" font-family="Fira Code" font-size="10.5" fill="#64748b">100%</text>
+<text x="{lx:.1}" y="{y50:.1}" text-anchor="end" font-family="Fira Code" font-size="10.5" fill="#64748b">50%</text>
+<text x="{lx:.1}" y="{y0:.1}" text-anchor="end" font-family="Fira Code" font-size="10.5" fill="#64748b">0%</text>"##,
         lx = axis_x - 4.0,
-        y100 = plot_y + 11.5,
-        y50 = plot_y + plot_h * 0.5 + 3.2,
+        y100 = plot_y + 12.5,
+        y50 = plot_y + plot_h * 0.5 + 3.6,
         y0 = plot_y + plot_h - 4.5,
     );
 
@@ -1155,7 +1217,7 @@ fn render_project_workspace_card(
     let header_cy = if is_header_only {
         rect.y + rect.h * 0.5
     } else {
-        rect.y + 26.0
+        rect.y + 28.0
     };
     let dot_center = render_project_identicon_badge(
         svg,
@@ -1166,16 +1228,22 @@ fn render_project_workspace_card(
         accent_hex,
         animated_pass,
     );
+    let name_char_cap = if project.git_changes.is_some() {
+        ((inner_w * 0.44) / 11.4).clamp(10.0, 26.0) as usize
+    } else {
+        ((inner_w - 44.0).max(80.0) / 11.4).clamp(10.0, 32.0) as usize
+    };
+    let displayed_name = truncate_chars(&project.project_name, name_char_cap);
     let _ = write!(
         svg,
-        r##"<text x="{tx:.1}" y="{ty:.1}" font-family="Roboto" font-weight="bold" font-size="18" fill="{fg}">{pname}</text>"##,
-        tx = inner_x + 36.0,
-        ty = header_cy + 6.0,
+        r##"<text x="{tx:.1}" y="{ty:.1}" font-family="Roboto" font-weight="bold" font-size="20" fill="{fg}">{pname}</text>"##,
+        tx = inner_x + 38.0,
+        ty = header_cy + 6.8,
         fg = palette.text_primary_hex,
-        pname = xml_escape(&truncate_chars(&project.project_name, 26)),
+        pname = xml_escape(&displayed_name),
     );
 
-    let name_px_est = (project.project_name.chars().count().min(26) as f32) * 10.2 + 48.0;
+    let name_px_est = (displayed_name.chars().count() as f32) * 11.4 + 50.0;
     let mut git_diff_bar = None;
     if let Some(git) = &project.git_changes {
         git_diff_bar = render_project_header_git_summary(
@@ -1205,13 +1273,13 @@ fn render_project_workspace_card(
         r##"<line x1="{x1:.1}" y1="{ly:.1}" x2="{x2:.1}" y2="{ly:.1}" stroke="{border}" stroke-width="1"/>"##,
         x1 = inner_x,
         x2 = inner_x + inner_w,
-        ly = rect.y + 46.0,
+        ly = rect.y + 50.0,
         border = palette.card_border_hex,
     );
 
-    let mut cursor_y = rect.y + 56.0;
+    let mut cursor_y = rect.y + 60.0;
     let card_bottom = rect.y + rect.h - 16.0;
-    let total_body_h = (card_bottom - cursor_y).max(56.0);
+    let total_body_h = (card_bottom - cursor_y).max(60.0);
     let section_gap = 10.0_f32;
 
     let mut todo_ring = None;
@@ -1220,7 +1288,7 @@ fn render_project_workspace_card(
             total_body_h
         } else {
             let rows = project.todos.open_items.len().clamp(1, 3);
-            (32.0 + rows as f32 * 21.5).clamp(56.0, (total_body_h * 0.45).max(56.0))
+            (34.0 + rows as f32 * 23.5).clamp(60.0, (total_body_h * 0.45).max(60.0))
         };
         todo_ring = render_project_todos_section(
             svg,
@@ -1288,13 +1356,13 @@ fn render_project_identicon_badge(
     let digest = Sha256::digest(project_name.as_bytes());
     let (fg_hex, bg_hex) = IDENTICON_PALETTE[(digest[0] as usize) % IDENTICON_PALETTE.len()];
 
-    let size = 26.0_f32;
+    let size = 28.0_f32;
     let bx = x;
     let by = header_cy - size * 0.5;
 
     let _ = write!(
         svg,
-        r##"<rect x="{bx:.1}" y="{by:.1}" width="{size:.1}" height="{size:.1}" rx="7" fill="{bg_hex}" stroke="{fg_hex}" stroke-opacity="0.45" stroke-width="1"/>"##,
+        r##"<rect x="{bx:.1}" y="{by:.1}" width="{size:.1}" height="{size:.1}" rx="7.5" fill="{bg_hex}" stroke="{fg_hex}" stroke-opacity="0.45" stroke-width="1"/>"##,
     );
 
     let mut cells = [[false; 5]; 5];
@@ -1319,10 +1387,10 @@ fn render_project_identicon_badge(
         cells[3][3] = true;
     }
 
-    let grid_origin_x = bx + 4.5;
-    let grid_origin_y = by + 4.5;
-    let step = 3.5_f32;
-    let cell_size = 3.0_f32;
+    let grid_origin_x = bx + 4.8;
+    let grid_origin_y = by + 4.8;
+    let step = 3.8_f32;
+    let cell_size = 3.2_f32;
 
     for (row_idx, row_cells) in cells.iter().enumerate() {
         for (col_idx, &is_lit) in row_cells.iter().enumerate() {
@@ -1373,13 +1441,13 @@ fn render_project_agents_section(
         return row_anchors;
     }
 
-    let max_visible = ((h / 58.0).floor() as usize).clamp(1, 4);
+    let max_visible = ((h / 62.0).floor() as usize).clamp(1, 4);
     let shown = &agents[..agents.len().min(max_visible)];
     let gap = 8.0_f32;
     let row_h = ((h - gap * (shown.len().saturating_sub(1) as f32)) / shown.len() as f32)
-        .clamp(54.0, 82.0);
+        .clamp(58.0, 88.0);
     let mut ry = y;
-    let max_chars = (((w - 34.0).max(50.0)) / 7.9) as usize;
+    let max_chars = (((w - 34.0).max(50.0)) / 8.3) as usize;
 
     for agent in shown {
         let state_color = color_for_agent_state(agent.activity_state, palette);
@@ -1399,10 +1467,10 @@ fn render_project_agents_section(
             bh = (row_h - 16.0).max(12.0),
         );
 
-        let top_y = ry + 21.0;
+        let top_y = ry + 23.0;
         let _ = write!(
             svg,
-            r##"<text x="{tx:.1}" y="{top_y:.1}" font-family="Roboto" font-weight="bold" font-size="14.5" fill="{fg}">{rname}</text>"##,
+            r##"<text x="{tx:.1}" y="{top_y:.1}" font-family="Roboto" font-weight="bold" font-size="15.5" fill="{fg}">{rname}</text>"##,
             tx = x + 19.0,
             fg = palette.text_primary_hex,
             rname = xml_escape(agent.runtime_kind.display_name()),
@@ -1413,9 +1481,9 @@ fn render_project_agents_section(
             AgentActivityState::Working | AgentActivityState::Blocked | AgentActivityState::Error
         );
         let badge_x = if has_live_spinner {
-            x + 144.0
+            x + 150.0
         } else {
-            x + 128.0
+            x + 134.0
         };
 
         let badge = match (&agent.activity_state, agent.blocked_kind.as_deref()) {
@@ -1426,7 +1494,7 @@ fn render_project_agents_section(
         };
         let _ = write!(
             svg,
-            r##"<text x="{badge_x:.1}" y="{top_y:.1}" font-family="Fira Code" font-weight="bold" font-size="12" fill="{state_color}">{badge}</text>"##,
+            r##"<text x="{badge_x:.1}" y="{top_y:.1}" font-family="Fira Code" font-weight="bold" font-size="12.5" fill="{state_color}">{badge}</text>"##,
             badge = xml_escape(&badge),
         );
 
@@ -1438,19 +1506,24 @@ fn render_project_agents_section(
                     w,
                     h: row_h,
                 },
-                spinner_center: (x + 131.0, top_y - 4.2),
+                spinner_center: (x + 136.0, top_y - 4.5),
                 activity_state: agent.activity_state,
             });
         }
 
-        let meta_right = format_agent_location_meta(agent, project_name);
-        let _ = write!(
-            svg,
-            r##"<text x="{rx:.1}" y="{top_y:.1}" text-anchor="end" font-family="Fira Code" font-size="12" fill="{muted}">{meta}</text>"##,
-            rx = x + w - 12.0,
-            muted = palette.text_muted_hex,
-            meta = xml_escape(&truncate_chars(&meta_right, 34)),
-        );
+        let badge_end_x = badge_x + (badge.chars().count() as f32) * 7.8 + 10.0;
+        let meta_avail_w = (x + w - 12.0 - badge_end_x).max(0.0);
+        if meta_avail_w >= 48.0 {
+            let meta_right = format_agent_location_meta(agent, project_name);
+            let meta_max_chars = ((meta_avail_w / 7.8) as usize).clamp(4, 34);
+            let _ = write!(
+                svg,
+                r##"<text x="{rx:.1}" y="{top_y:.1}" text-anchor="end" font-family="Fira Code" font-size="12.5" fill="{muted}">{meta}</text>"##,
+                rx = x + w - 12.0,
+                muted = palette.text_muted_hex,
+                meta = xml_escape(&truncate_chars(&meta_right, meta_max_chars)),
+            );
+        }
 
         let line1 = agent
             .status_message
@@ -1460,9 +1533,9 @@ fn render_project_agents_section(
             .unwrap_or("Ready at prompt");
         let _ = write!(
             svg,
-            r##"<text x="{tx:.1}" y="{ly:.1}" font-family="Fira Code" font-size="12.5" fill="{sec}">{l1}</text>"##,
+            r##"<text x="{tx:.1}" y="{ly:.1}" font-family="Fira Code" font-size="13.5" fill="{sec}">{l1}</text>"##,
             tx = x + 19.0,
-            ly = ry + 42.0,
+            ly = ry + 45.0,
             sec = palette.text_secondary_hex,
             l1 = xml_escape(&truncate_chars(line1, max_chars)),
         );
@@ -1473,14 +1546,14 @@ fn render_project_agents_section(
             .map(String::as_str)
             .find(|cand| !lines_substantially_equal(line1, cand));
 
-        if row_h >= 72.0
+        if row_h >= 76.0
             && let Some(line2) = distinct_line2
         {
             let _ = write!(
                 svg,
-                r##"<text x="{tx:.1}" y="{ly:.1}" font-family="Fira Code" font-size="12" fill="{muted}">{l2}</text>"##,
+                r##"<text x="{tx:.1}" y="{ly:.1}" font-family="Fira Code" font-size="12.5" fill="{muted}">{l2}</text>"##,
                 tx = x + 19.0,
-                ly = ry + 61.0,
+                ly = ry + 66.0,
                 muted = palette.text_muted_hex,
                 l2 = xml_escape(&truncate_chars(line2, max_chars)),
             );
@@ -1562,16 +1635,16 @@ fn render_project_header_git_summary(
         String::new()
     };
     let branch_label = format!("{}{}{}", truncate_chars(&git.branch_name, 18), sync, wt_suffix);
-    let bw = (branch_label.chars().count() as f32 * 7.6 + 18.0).clamp(58.0, 190.0);
+    let bw = (branch_label.chars().count() as f32 * 8.0 + 20.0).clamp(62.0, 200.0);
 
     let mut stats_left_limit = left_x;
     if left_x + bw <= right_x - 10.0 {
         render_pill(
             svg,
             left_x,
-            header_cy - 12.0,
+            header_cy - 13.0,
             bw,
-            24.0,
+            26.0,
             "#112233",
             &palette.accent_cyan_hex,
             &branch_label,
@@ -1586,7 +1659,7 @@ fn render_project_header_git_summary(
 
     let diff_bar_w = 58.0_f32;
     let diff_bar_x = right_x - diff_bar_w;
-    let diff_bar_y = header_cy - 3.0;
+    let diff_bar_y = header_cy - 3.5;
     let total_lines = (git.insertions + git.deletions).max(1) as f32;
     let add_ratio = if git.insertions + git.deletions > 0 {
         (git.insertions as f32 / total_lines).clamp(0.0, 1.0)
@@ -1604,8 +1677,8 @@ fn render_project_header_git_summary(
         let del_w = (diff_bar_w - add_w).max(0.0);
         let _ = write!(
             svg,
-            r##"<rect x="{diff_bar_x:.1}" y="{diff_bar_y:.1}" width="{add_w:.1}" height="6" rx="2" fill="{add}"/>
-<rect x="{dx:.1}" y="{diff_bar_y:.1}" width="{del_w:.1}" height="6" rx="2" fill="{del}"/>"##,
+            r##"<rect x="{diff_bar_x:.1}" y="{diff_bar_y:.1}" width="{add_w:.1}" height="7" rx="2.5" fill="{add}"/>
+<rect x="{dx:.1}" y="{diff_bar_y:.1}" width="{del_w:.1}" height="7" rx="2.5" fill="{del}"/>"##,
             dx = diff_bar_x + add_w,
             add = palette.diff_added_hex,
             del = palette.diff_removed_hex,
@@ -1628,7 +1701,7 @@ fn render_project_header_git_summary(
         if git.untracked_file_count > 0 {
             parts.push(format!("{} new", git.untracked_file_count));
         }
-        let max_chars = (text_avail_w / 7.4) as usize;
+        let max_chars = (text_avail_w / 7.8) as usize;
         let full = parts.join(" · ");
         let counts_str = if full.chars().count() <= max_chars {
             full
@@ -1649,8 +1722,8 @@ fn render_project_header_git_summary(
         };
         let _ = write!(
             svg,
-            r##"<text x="{text_right_x:.1}" y="{ty:.1}" text-anchor="end" font-family="Fira Code" font-size="11.8" fill="{cyan}">{counts}</text>"##,
-            ty = header_cy + 4.2,
+            r##"<text x="{text_right_x:.1}" y="{ty:.1}" text-anchor="end" font-family="Fira Code" font-size="12.5" fill="{cyan}">{counts}</text>"##,
+            ty = header_cy + 4.5,
             cyan = palette.accent_cyan_hex,
             counts = xml_escape(&counts_str),
         );
@@ -1661,7 +1734,7 @@ fn render_project_header_git_summary(
             x: diff_bar_x,
             y: diff_bar_y,
             w: diff_bar_w,
-            h: 6.0,
+            h: 7.0,
         },
         add_ratio,
     ))
@@ -1684,9 +1757,9 @@ fn render_project_todos_section(
         border = palette.card_border_hex,
     );
 
-    let ring_cx = x + 36.0;
+    let ring_cx = x + 38.0;
     let ring_cy = y + h * 0.5;
-    let radius = 18.5_f32;
+    let radius = 20.0_f32;
     let circumference = 2.0 * std::f32::consts::PI * radius;
     let ratio = (todos.completed_count as f32 / todos.total_count.max(1) as f32).clamp(0.0, 1.0);
     let dash = circumference * ratio;
@@ -1699,52 +1772,52 @@ fn render_project_todos_section(
 
     let _ = write!(
         svg,
-        r##"<circle cx="{ring_cx:.1}" cy="{ring_cy:.1}" r="{radius:.1}" fill="none" stroke="{elev}" stroke-width="4.5"/>"##,
+        r##"<circle cx="{ring_cx:.1}" cy="{ring_cy:.1}" r="{radius:.1}" fill="none" stroke="{elev}" stroke-width="4.8"/>"##,
         elev = palette.card_elevated_hex,
     );
     if !animated_pass {
         let _ = write!(
             svg,
-            r##"<circle cx="{ring_cx:.1}" cy="{ring_cy:.1}" r="{radius:.1}" fill="none" stroke="{ring_color}" stroke-width="4.5" stroke-linecap="round" stroke-dasharray="{dash:.1} {circumference:.1}" transform="rotate(-90 {ring_cx:.1} {ring_cy:.1})"/>"##,
+            r##"<circle cx="{ring_cx:.1}" cy="{ring_cy:.1}" r="{radius:.1}" fill="none" stroke="{ring_color}" stroke-width="4.8" stroke-linecap="round" stroke-dasharray="{dash:.1} {circumference:.1}" transform="rotate(-90 {ring_cx:.1} {ring_cy:.1})"/>"##,
         );
     }
     let _ = write!(
         svg,
-        r##"<text x="{ring_cx:.1}" y="{ty:.1}" text-anchor="middle" font-family="Fira Code" font-weight="bold" font-size="10.5" fill="{fg}">{count_txt}</text>"##,
-        ty = ring_cy + 3.8,
+        r##"<text x="{ring_cx:.1}" y="{ty:.1}" text-anchor="middle" font-family="Fira Code" font-weight="bold" font-size="11.5" fill="{fg}">{count_txt}</text>"##,
+        ty = ring_cy + 4.1,
         fg = palette.text_primary_hex,
         count_txt = xml_escape(&count_txt),
     );
 
     let ring_anchor = Some(((ring_cx, ring_cy), radius, ratio));
-    let list_x = x + 68.0;
-    let max_chars = (((w - 84.0).max(40.0)) / 8.0) as usize;
+    let list_x = x + 72.0;
+    let max_chars = (((w - 86.0).max(40.0)) / 8.4) as usize;
 
     if todos.open_items.is_empty() {
         let _ = write!(
             svg,
-            r##"<text x="{list_x:.1}" y="{ty:.1}" font-family="Roboto" font-size="13.5" fill="{work}">All {total} project to-dos completed</text>"##,
-            ty = ring_cy + 4.5,
+            r##"<text x="{list_x:.1}" y="{ty:.1}" font-family="Roboto" font-size="14.5" fill="{work}">All {total} project to-dos completed</text>"##,
+            ty = ring_cy + 5.0,
             work = palette.status_working_hex,
             total = todos.total_count,
         );
         return ring_anchor;
     }
 
-    let max_rows = (((h - 14.0) / 21.0).floor() as usize).clamp(1, 4);
+    let max_rows = (((h - 14.0) / 23.0).floor() as usize).clamp(1, 4);
     let shown = todos.open_items.len().min(max_rows);
-    let block_h = (shown.saturating_sub(1) as f32) * 21.0;
-    let mut iy = ring_cy - block_h * 0.5 + 4.2;
+    let block_h = (shown.saturating_sub(1) as f32) * 23.0;
+    let mut iy = ring_cy - block_h * 0.5 + 4.6;
 
     for item in todos.open_items.iter().take(shown) {
         let line = format!("[ ] {item}");
         let _ = write!(
             svg,
-            r##"<text x="{list_x:.1}" y="{iy:.1}" font-family="Fira Code" font-size="12.5" fill="{sec}">{line}</text>"##,
+            r##"<text x="{list_x:.1}" y="{iy:.1}" font-family="Fira Code" font-size="13.5" fill="{sec}">{line}</text>"##,
             sec = palette.text_secondary_hex,
             line = xml_escape(&truncate_chars(&line, max_chars)),
         );
-        iy += 21.0;
+        iy += 23.0;
     }
 
     ring_anchor
@@ -1763,11 +1836,11 @@ fn render_pill(
 ) {
     let rx = h * 0.5;
     let cx = x + w * 0.5;
-    let ty = y + h * 0.5 + 4.3;
+    let ty = y + h * 0.5 + 4.5;
     let _ = write!(
         svg,
         r##"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" rx="{rx:.1}" fill="{bg_hex}" stroke="{fg_hex}" stroke-opacity="0.35" stroke-width="1"/>
-<text x="{cx:.1}" y="{ty:.1}" text-anchor="middle" font-family="Fira Code" font-weight="bold" font-size="11.8" fill="{fg_hex}">{t}</text>"##,
+<text x="{cx:.1}" y="{ty:.1}" text-anchor="middle" font-family="Fira Code" font-weight="bold" font-size="12.5" fill="{fg_hex}">{t}</text>"##,
         t = xml_escape(text),
     );
 }
@@ -1941,5 +2014,122 @@ mod tests {
             .rasterize_svg_to_zlib_b64(&svg, 640, 400, palette.bg_rgb)
             .unwrap();
         assert!(!compressed.is_empty());
+    }
+
+    #[test]
+    fn ui_scale_reduces_logical_canvas_and_preserves_aspect_ratio() {
+        let palette = WallboardThemePalette::obsidian_cockpit();
+        let snapshot = WallboardSnapshot::default();
+        let geometry = ViewportPixelGeometry {
+            cols: 165,
+            rows: 48,
+            pixel_width: 1164,
+            pixel_height: 728,
+        };
+
+        let (_, anchors_default) =
+            compose_bento_wallboard_svg_with_anchors_scaled(&snapshot, &palette, geometry, 1.0);
+        let (_, anchors_zoomed) =
+            compose_bento_wallboard_svg_with_anchors_scaled(&snapshot, &palette, geometry, 1.25);
+
+        assert!((anchors_default.logical_width - 1080.0).abs() < 0.5);
+        assert!(anchors_zoomed.logical_width < anchors_default.logical_width);
+        let expected_aspect = geometry.pixel_width as f32 / geometry.pixel_height as f32;
+        let default_aspect = anchors_default.logical_width / anchors_default.logical_height;
+        let zoomed_aspect = anchors_zoomed.logical_width / anchors_zoomed.logical_height;
+        assert!((default_aspect - expected_aspect).abs() < 0.02);
+        assert!((zoomed_aspect - expected_aspect).abs() < 0.02);
+    }
+
+    #[test]
+    fn renders_multi_project_two_column_layout_at_legion_go_viewport() {
+        let palette = WallboardThemePalette::obsidian_cockpit();
+        let mut snapshot = WallboardSnapshot {
+            captured_at_clock: String::from("02:30:00"),
+            host_vitals: HostVitalsSnapshot {
+                hostname: String::from("legion-go"),
+                platform_label: String::from("Bazzite"),
+                cpu_usage_percent: 42.0,
+                memory_used_gib: 7.2,
+                memory_total_gib: 15.2,
+                disk_free_gib: Some(437.0),
+                disk_total_gib: Some(474.0),
+                swap_label: String::from("zram"),
+                ..HostVitalsSnapshot::default()
+            },
+            ..WallboardSnapshot::default()
+        };
+
+        for (name, state) in [
+            ("rex-hud", AgentActivityState::Working),
+            ("over9k", AgentActivityState::Blocked),
+            ("rex-core", AgentActivityState::Done),
+        ] {
+            snapshot.projects.push(ProjectWorkspaceCard {
+                project_path: PathBuf::from(format!("/tmp/{name}")),
+                project_name: name.to_string(),
+                agents: vec![AgentCardSnapshot {
+                    host_label: String::from("local"),
+                    origin: MultiplexerOrigin::Rex,
+                    session_label: String::from("Everyday"),
+                    window_label: String::from("dev"),
+                    block_label: String::from("agy"),
+                    runtime_kind: AgentRuntimeKind::Antigravity,
+                    program_label: String::from("agy"),
+                    activity_state: state,
+                    blocked_kind: (state == AgentActivityState::Blocked)
+                        .then(|| String::from("permission")),
+                    status_message: Some(String::from("Implementing responsive Legion Go scaling")),
+                    progress_percent: None,
+                    working_directory: Some(PathBuf::from(format!("/tmp/{name}"))),
+                    repository_name: name.to_string(),
+                    branch_name: Some(String::from("main")),
+                    state_duration_seconds: Some(95),
+                    recent_output_lines: vec![String::from("All unit tests passing")],
+                }],
+                git_changes: Some(ProjectGitChanges {
+                    branch_name: String::from("main"),
+                    commits_ahead: 1,
+                    commits_behind: 0,
+                    modified_file_count: 3,
+                    staged_file_count: 1,
+                    untracked_file_count: 0,
+                    insertions: 185,
+                    deletions: 42,
+                    worktree_count: 1,
+                }),
+                todos: ProjectTodoSummary {
+                    project_name: name.to_string(),
+                    completed_count: 2,
+                    total_count: 4,
+                    open_items: vec![
+                        String::from("Verify readability on 8.8 inch screen"),
+                        String::from("Test podman build"),
+                    ],
+                },
+            });
+        }
+
+        let geometry = ViewportPixelGeometry {
+            cols: 165,
+            rows: 48,
+            pixel_width: 1164,
+            pixel_height: 728,
+        };
+        let (svg, anchors) =
+            compose_bento_wallboard_svg_with_anchors_scaled(&snapshot, &palette, geometry, 1.0);
+        assert_eq!(anchors.project_cards.len(), 3);
+        assert!(anchors.cpu_chart_rect.is_some());
+        assert!(anchors.ram_chart_rect.is_some());
+        assert!(svg.contains("rex-hud"));
+        assert!(svg.contains("over9k"));
+        assert!(svg.contains("rex-core"));
+
+        let canvas = KittyViewportCanvas::with_scale(1.0);
+        let pixmap = canvas
+            .rasterize_svg_to_pixmap(&svg, 1164, 728, palette.bg_rgb)
+            .unwrap();
+        assert_eq!(pixmap.width(), 1164);
+        assert_eq!(pixmap.height(), 728);
     }
 }

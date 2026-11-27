@@ -41,6 +41,7 @@ def resolve-rex-hud-binary [] {
 
 def main [
     --cwd: string = ""
+    --scale: string = ""
     --text
     --snapshot
     --install: string = ""
@@ -74,6 +75,9 @@ def main [
     mut args = ["ui" "--mode" "kiosk"]
     if not ($cwd | is-empty) {
         $args = ($args | append ["--cwd" ($cwd | path expand)])
+    }
+    if not ($scale | is-empty) {
+        $args = ($args | append ["--scale" $scale])
     }
     if $text {
         $args = ($args | append "--text")

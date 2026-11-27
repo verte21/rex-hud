@@ -212,18 +212,18 @@ impl ProjectWorkspaceCard {
         let has_todos = self.todos.total_count > 0;
         let agent_count = self.agents.len().min(4);
         if !has_todos && agent_count == 0 {
-            return 52.0;
+            return 58.0;
         }
-        let mut h = 56.0_f32;
+        let mut h = 62.0_f32;
         if has_todos {
             let todo_rows = self.todos.open_items.len().clamp(1, 3);
-            h += (32.0 + todo_rows as f32 * 21.5).max(56.0);
+            h += (34.0 + todo_rows as f32 * 23.5).max(60.0);
             if agent_count > 0 {
                 h += 10.0;
             }
         }
         if agent_count > 0 {
-            h += agent_count as f32 * 82.0 + (agent_count.saturating_sub(1) as f32) * 8.0;
+            h += agent_count as f32 * 88.0 + (agent_count.saturating_sub(1) as f32) * 8.0;
         }
         h + 16.0
     }

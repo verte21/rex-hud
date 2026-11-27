@@ -51,6 +51,7 @@ pub fn resolve_rex_binary() -> String {
         home.join(".local/bin/rex"),
         home.join(".cargo/bin/rex"),
         home.join("Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"),
+        PathBuf::from("/home/linuxbrew/.linuxbrew/bin/rex"),
         PathBuf::from("/opt/homebrew/bin/rex"),
         PathBuf::from("/usr/local/bin/rex"),
         PathBuf::from("/usr/bin/rex"),
@@ -1611,25 +1612,51 @@ fn collect_macos_vitals() -> HostVitalsSnapshot {
 }
 
 fn collect_root_disk_gib() -> (Option<f32>, Option<f32>) {
-    let Some(df_out) = run_simple_command("df", &["-Pk", "/"]) else {
-        return (None, None);
-    };
-    let Some(line) = df_out.lines().nth(1) else {
-        return (None, None);
-    };
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    if cols.len() < 4 {
-        return (None, None);
+    let home = user_home_directory();
+    let home_str = home.to_string_lossy().into_owned();
+    let candidates: [&str; 2] = [home_str.as_str(), "/"];
+
+    for target in candidates {
+        if target.is_empty() {
+            continue;
+        }
+        let Some(df_out) = Command::new("df")
+            .env("LC_ALL", "C")
+            .args(["-Pk", target])
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        else {
+            continue;
+        };
+        if let Some((avail, total)) = parse_df_pk_gib(&df_out) {
+            return (Some(avail), Some(total));
+        }
     }
-    let total_kib = cols[1].parse::<u64>().ok();
-    let avail_kib = cols[3].parse::<u64>().ok();
-    match (avail_kib, total_kib) {
-        (Some(avail), Some(total)) if total > 0 => (
-            Some(avail as f32 / (1024.0 * 1024.0)),
-            Some(total as f32 / (1024.0 * 1024.0)),
-        ),
-        _ => (None, None),
+    (None, None)
+}
+
+pub fn parse_df_pk_gib(df_output: &str) -> Option<(f32, f32)> {
+    for line in df_output.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        let Some(pct_idx) = cols.iter().position(|tok| tok.ends_with('%')) else {
+            continue;
+        };
+        if pct_idx < 3 {
+            continue;
+        }
+        let total_kib = cols[pct_idx - 3].parse::<u64>().ok()?;
+        let avail_kib = cols[pct_idx - 1].parse::<u64>().ok()?;
+        if total_kib > 0 {
+            return Some((
+                avail_kib as f32 / (1024.0 * 1024.0),
+                total_kib as f32 / (1024.0 * 1024.0),
+            ));
+        }
     }
+    None
 }
 
 fn read_short_hostname() -> String {
@@ -1783,5 +1810,24 @@ Press Shift+Tab to switch agent modes, or change Agent Mode in /config.
                 String::from("Building release target..."),
             ]
         );
+    }
+
+    #[test]
+    fn parses_df_pk_output_with_or_without_filesystem_column() {
+        let bazzite = "\
+Filesystem     1024-blocks     Used Available Capacity Mounted on
+/dev/nvme0n1p3   497394688 35418352 459711888       8% /var/home
+";
+        let (avail, total) = parse_df_pk_gib(bazzite).unwrap();
+        assert!((avail - 438.4).abs() < 0.2);
+        assert!((total - 474.35).abs() < 0.2);
+
+        let missing_fs = "\
+Filesystem 1024-blocks Used Available Capacity Mounted on
+           6467192     0    6467192   0%       /
+";
+        let (avail2, total2) = parse_df_pk_gib(missing_fs).unwrap();
+        assert!((avail2 - 6.167).abs() < 0.05);
+        assert!((total2 - 6.167).abs() < 0.05);
     }
 }

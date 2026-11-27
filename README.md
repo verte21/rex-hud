@@ -23,6 +23,8 @@ Run directly in Ghostty, Kitty, WezTerm, or Konsole (or via the included Nushell
 
 ```nu
 rex-hud
+# adjust UI scale if needed (or set REX_HUD_SCALE=1.25):
+rex-hud --scale 1.25
 # or via Nushell kiosk launcher:
 nu scripts/rex-hud.nu
 ```
@@ -34,7 +36,7 @@ cargo build --release
 ./target/release/rex-hud install
 ```
 
-Cross-compile the static `x86_64-unknown-linux-musl` binary on macOS via Docker:
+Cross-compile the static `x86_64-unknown-linux-musl` binary via Docker or Podman (e.g. on macOS or Bazzite):
 
 ```sh
 ./scripts/build-linux.sh
